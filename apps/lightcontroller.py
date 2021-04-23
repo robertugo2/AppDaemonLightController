@@ -3,8 +3,6 @@ LightController - controls light according to programmed scenes based on multipl
 like switches, motions sensors and door/window sensors
 
 For more info read README.md
-```
-
 """
 import appdaemon.plugins.hass.hassapi as hass
 import appdaemon.plugins.mqtt.mqttapi as mqtt
