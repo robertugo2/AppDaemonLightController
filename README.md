@@ -1,8 +1,9 @@
 Light Controller
-===============
-Controls light according to programmed scenes based on multiple inputs
+================
+[AppDaemon](https://appdaemon.readthedocs.io/) app - Controls light according to programmed scenes based on multiple inputs
 like switches, motions sensors and door/window sensors.
 Suitable for users, that have smart light always power on and zigbee switches.
+Needs to be used with [HomeAssistant](https://www.home-assistant.io/)
 
 Main features:
 * Supports 3 build-in, configurable scenes
