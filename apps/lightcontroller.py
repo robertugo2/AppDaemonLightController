@@ -196,8 +196,7 @@ class LightController(hass.Hass, mqtt.Mqtt):
         self.log('Timer timeout')
 
     def process_default_scene(self):
-        if (self.sun_state != BELOW_HORIZON) and self.now_is_between(self.cold_scene_time_start,
-                                                                     self.cold_scene_time_end):
+        if (self.sun_state != BELOW_HORIZON) and self.now_is_between(self.cold_scene_time_start, self.cold_scene_time_end):
             self.default_scene = COLD
         else:
             self.default_scene = WARM
@@ -216,10 +215,6 @@ class LightController(hass.Hass, mqtt.Mqtt):
         if not event:
             return
         self.log("Action '%s' from '%s'" % (event, entity))
-        now = time.time()
-        if now - self.last_command < self.debounce:
-            self.log('Command debounced')
-            return
         switch = self.switches[entity]
         if event == switch[SINGLE]:
             if self.current_state == OFF:
@@ -234,13 +229,13 @@ class LightController(hass.Hass, mqtt.Mqtt):
         if event == switch[HOLD]:
             if self.current_state != DIMM:
                 self.select_scene(DIMM)
-        self.last_command = time.time()
 
     def on_light(self, entity, attribute, old, new, kwargs):
         self.current_state = self.detect_state()
         self.process_light_timeout()
 
     def on_time(self, kwargs):
+        self.log("Time triggered default scene processing.")
         self.process_default_scene()
 
     def on_sun(self, entity, attribute, old, new, kwargs):
@@ -287,6 +282,11 @@ class LightController(hass.Hass, mqtt.Mqtt):
 
     def select_scene(self, scene, transition=0):
         self.log('Changing scene to %s' % scene)
+        now = time.time()
+        # 'transition < 5' condition is for long transitions, like changing default scene.
+        if ((now - self.last_command) < self.debounce) and (transition < 5):
+            self.log('Command debounced')
+            return
         if scene == OFF:
             self.my_turn_off(transition=transition)
         if self.color_temp_support:
@@ -306,6 +306,7 @@ class LightController(hass.Hass, mqtt.Mqtt):
                 self.my_turn_on(transition=transition, brightness=self.scene_warm[BRIGHTNESS])
             if scene == DIMM:
                 self.my_turn_on(transition=transition, brightness=self.scene_dimm[BRIGHTNESS])
+        self.last_command = time.time()
 
     def my_turn_on(self, **kwargs):
         if self.mqtt_entity:
