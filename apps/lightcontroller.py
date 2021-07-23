@@ -91,13 +91,22 @@ class LightController(hass.Hass, mqtt.Mqtt):
 
         # Configure time based scene selector. Used in addition to sun based processing.
         if self.args.get("cold_scene_time"):
-            self.cold_scene_time_start = self.args["cold_scene_time_period"]["start"]
-            self.cold_scene_time_end = self.args["cold_scene_time_period"]["end"]
+            self.cold_scene_time = self.args['cold_scene_time']
         else:
-            self.cold_scene_time_start = "06:50:00"
-            self.cold_scene_time_end = "19:00:00"
-        self.run_daily(self.on_time, self.cold_scene_time_start, random_start=5, random_end=10)
-        self.run_daily(self.on_time, self.cold_scene_time_end, random_start=5, random_end=10)
+            self.cold_scene_time = {
+                'start': "06:50:00",
+                'end': "19:00:00"
+            }
+        self.run_daily(self.on_time, self.cold_scene_time['start'], random_start=5, random_end=10)
+        self.run_daily(self.on_time, self.cold_scene_time['end'], random_start=5, random_end=10)
+
+        # For dimm scene, we don't want to have default behavior
+        if self.args.get("warm_scene_time"):
+            self.warm_scene_time = self.args['warm_scene_time']
+            self.run_daily(self.on_time, self.warm_scene_time['start'], random_start=5, random_end=10)
+            self.run_daily(self.on_time, self.warm_scene_time['end'], random_start=5, random_end=10)
+        else:
+            self.warm_scene_time = None
 
         # Listen state of light
         # State of light is buffered to speed up execution time
@@ -196,10 +205,12 @@ class LightController(hass.Hass, mqtt.Mqtt):
         self.log('Timer timeout')
 
     def process_default_scene(self):
-        if (self.sun_state != BELOW_HORIZON) and self.now_is_between(self.cold_scene_time_start, self.cold_scene_time_end):
+        if (self.sun_state != BELOW_HORIZON) and self.now_is_between(self.cold_scene_time['start'], self.cold_scene_time['end']):
             self.default_scene = COLD
-        else:
+        elif (self.warm_scene_time is None) or self.now_is_between(self.warm_scene_time['start'], self.warm_scene_time['end']):
             self.default_scene = WARM
+        else:
+            self.default_scene = DIMM
         self.log('Setting default scene to %s' % str(self.default_scene))
 
         if self.auto_color_temp_change:
