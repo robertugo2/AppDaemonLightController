@@ -10,11 +10,12 @@ Main features:
     - cold - used during daylight
     - warm - used for afternoon
     - dimmed - as a night light
-* Speed - where it is possible, state is cached to speed up calculation of response
-* Commands and responses are send via mqtt, but light can be controlled via HA as well
-* Sun on/off detection
+* Speed - where it is possible, state is cached to speed up calculation of response.
+* Commands are sent and responses are received via mqtt, but light can be controlled via HA as well
+* Configurable warm/cold scene time periods
 * Support motions sensors
 * Support contact sensors
+* Smart functionality for combining all sensors and switches
 
 Minimal configuration:
 ```yaml
@@ -60,9 +61,7 @@ light_ctrl:
         brightness: 1
     # If light don't support color_temp, then it is needed to set following flag to false:
     color_temp_support: True
-    # If you want to automatically change the light color on some events like sunset, then set following flag:
-    auto_color_temp_change: True
-    # Suppress multiple clicks for x seconds:
+    # Suppress multiple clicks/commands/service calls for x seconds:
     debounce: 1
     # Define HA light entity to control. Still needed, even if z2m entity is defined.
     light_entity: light.light_1
@@ -77,10 +76,18 @@ light_ctrl:
           double: "left_double"
           hold: "left_hold"
     # Define additional time bounds for cold scene.
-    # If not defined, cold/warm scene will be selected based on sun position only.
+    # If not defined, default values below will be used
     cold_scene_time:
         start: "07:00:00"
         end: "19:00:00"
+    # If you want to automatically change the light color on time boundaries defined upper, 
+    # then set following flag:
+    auto_color_temp_change: True
+    # Define time bounds for warm scene, if you want to have default dimmed scene instead of warn on defined time boundaries. 
+    # No auto transition happens here.
+    warm_scene_time:
+        start: "05:00:00"
+        end: "22:00:00"
     # Define z2m motion sensors to define auto on function and timeout function
     motion_sensors:
         - name: occupancy_1
@@ -88,7 +95,28 @@ light_ctrl:
                         # if set to false, it will be used only to check, if timeout can be started to count
     # Timeout for motion sensors, that is after which time light should be turned off after not detecting a move.
     motion_timeout: 300  # seconds
+    # Set time for which movement will be ignored after manually turning off light
+    ignore_motion_after_turn_off_time = 5
+    # When light is going off due to no movement detection, 
+    # define time that will turn on light after movement detection without transition time
+    power_off_cancel_timeout = 8
+    # Define transition time for turning off light after motion detection timeout
+    motion_power_off_transition_time = 5
     # Contacts, that can trigger light on acion when contact=false.
     # To be used with door sensor, so when door goes open, light will turn on.
     contacts:
         - name: contact_1
+```
+It is also possible to control light via HA events:
+* Name: `lightctrl.set`
+* Data:
+```yaml
+light: some_name # Define name of light to set. Can be 'all' as well to set all lights
+lights: # You can define list of lights to control instead of defining one light
+  - light1
+  - light2
+# Action to perform, can be: turn_on, turn_off, toggle, set_scene
+action: some_action
+# If action is 'set_scene', it is needed to define scene to set. Can be OFF, DIMM, WARM, COLD
+scene: DIMM
+```
