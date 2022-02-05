@@ -14,6 +14,7 @@ import time
 OFF = 'OFF'
 ON = 'ON'
 COLD = 'COLD'
+MOTION_DIMMED = 'MOTION_DIMMED'
 WARM = 'WARM'
 DIMM = 'DIMM'
 UNDEFINED = 'UNDEFINED'
@@ -130,9 +131,10 @@ class LightController(hass.Hass, mqtt.Mqtt):
             self.timer = None
         else:
             self.motion_sensors = None
-        self.last_off_due_to_timeout = 0
+        self.last_change_due_to_timeout = 0
         self.power_off_cancel_timeout = self.args.get('power_off_cancel_timeout', 8)
         self.motion_power_off_transition_time = self.args.get('motion_power_off_transition_time', 5)
+        self.brightness_dimmed_light = self.args.get('brightness_dimmed_light', 8)
 
         self.contacts = {}
         if self.args.get('contacts'):
@@ -162,15 +164,15 @@ class LightController(hass.Hass, mqtt.Mqtt):
             action = data.get('action', None)
             transition = data.get('transition', 0)
             if action == 'turn_on':
-                if self.current_state == OFF:
+                if self.current_state in {OFF, MOTION_DIMMED}:
                     self.select_scene(self.default_scene, transition)
                     self.log("Turn ON the light due to event")
             elif action == 'turn_off':
                 if self.current_state != OFF:
                     self.select_scene(OFF, transition)
                     self.log("Turn OFF the light due to event")
-            elif action == 'set_scene':
-                scene = data.get('scene', None)
+            elif action == 'set_scene' and data.get('scene', None) in {OFF, WARM, COLD, DIMM}:
+                scene = data['scene']
                 self.select_scene(scene)
                 self.log("Select %s scene due to event" % scene)
             elif action == 'toggle':
@@ -192,7 +194,8 @@ class LightController(hass.Hass, mqtt.Mqtt):
             return
         self.contacts[contact_name] = contact_status
 
-        if contact_status is False and self.current_state == OFF:
+        # Some change occurred
+        if contact_status is False and self.current_state in {OFF, MOTION_DIMMED}:
             self.select_scene(self.default_scene)
             self.log("Light on due to %s contact sensor" % contact_name)
 
@@ -211,13 +214,14 @@ class LightController(hass.Hass, mqtt.Mqtt):
         self.motion_sensors[sensor_name] = occupancy
 
         # Actual motion processing
+        turned_on = False
         if (
-                (self.current_state == OFF) or
+                (self.current_state in {OFF, MOTION_DIMMED}) or
                 (
                         # This condition is for UNDEFINED state for situation, when light is turning off
-                        # and still not off, like during smooth turn off after timer timeout
+                        # or switching to dimm state and still not off, like during smooth change after timer timeout
                         self.current_state == UNDEFINED and
-                        (time.time() - self.last_off_due_to_timeout) < (self.motion_power_off_transition_time + 1)
+                        (time.time() - self.last_change_due_to_timeout) < (self.motion_power_off_transition_time + 1)
                 )
         ) and occupancy is True:
             # Light is off (or going to be off) and motion is detected.
@@ -226,10 +230,11 @@ class LightController(hass.Hass, mqtt.Mqtt):
                 # is less than 'ignore_motion_after_turn_off_time'.
                 self.log('Light on due to motion detection ignored, '
                          'as it is too close from turn off command via switch')
-            elif time.time() - self.last_off_due_to_timeout < self.power_off_cancel_timeout:
-                # Turn on the light due to motion status change near turn off event
+            elif self.timer is not None:
+                # old condition: time.time() - self.last_off_due_to_timeout < self.power_off_cancel_timeout:
+                # Timer is still running
                 self.select_scene(self.default_scene, transition=0, force=True)
-                self.last_off_due_to_timeout = 0
+                self.last_change_due_to_timeout = 0
                 self.log("Light on due to %s motion sensor (close to turn off due to timer)" % sensor_name)
             elif motion_sensor['turn_on']:
                 # Turn on the light
@@ -237,30 +242,40 @@ class LightController(hass.Hass, mqtt.Mqtt):
                 self.log("Light on due to %s motion sensor (turn_on flag enabled)" % sensor_name)
         self.process_light_timeout()
 
-    def process_light_timeout(self):
+    def process_light_timeout(self, turned_on=False):
         if self.motion_sensors is None:
             return
         all_motion_sensors_off = all([v is False for v in self.motion_sensors.values()])
         if self.timer is not None and (self.current_state == OFF or not all_motion_sensors_off):
+            # If timer is running and scene is OFF (so it was turned off externally) or motion is detected again,
+            # cancel timer if any
             self.cancel_timer(self.timer)
             self.timer = None
             self.log('Timer stop')
         if self.timer is None and self.current_state != OFF and all_motion_sensors_off:
+            # If timer is not running (so motion timeout is not running), light is on and there is no motion detected,
+            # then start timeout timer.
             self.timer = self.run_in(self.on_timer, self.motion_timeout)
             self.log('Timer start')
-        if self.current_state not in (OFF, UNDEFINED) and (
-                time.time() - self.last_off_due_to_timeout > 5) and self.last_off_due_to_timeout > 0:
+        if self.current_state not in (OFF, UNDEFINED, MOTION_DIMMED) and (
+                time.time() - self.last_change_due_to_timeout > 5) and self.last_change_due_to_timeout > 0:
             self.log(
                 'Cancel power on action, when motion will be detected again (close to turn off due to timer) due to '
                 'status not in OFF state')
-            self.last_off_due_to_timeout = 0
+            self.last_change_due_to_timeout = 0
 
     def on_timer(self, kwargs):
         self.timer = None
-        self.select_scene(OFF, transition=self.motion_power_off_transition_time)
-        self.last_off_due_to_timeout = time.time()
-        self.log('Timer timeout')
-        self.current_state = OFF
+        if self.current_state != MOTION_DIMMED:
+            self.select_scene(MOTION_DIMMED, transition=self.motion_power_off_transition_time)
+            self.current_state = MOTION_DIMMED  # set current scene here due to race condition
+            self.log('Timer timeout: Select MOTION_DIMMED scene')
+            self.timer = self.run_in(self.on_timer, self.power_off_cancel_timeout)
+        else:
+            self.select_scene(OFF, transition=self.motion_power_off_transition_time)
+            self.current_state = OFF  # set current scene here due to race condition
+            self.log('Timer timeout: Select OFF scene')
+        self.last_change_due_to_timeout = time.time()
 
     def process_default_scene(self):
         if self.now_is_between(self.cold_scene_time['start'], self.cold_scene_time['end']):
@@ -317,12 +332,18 @@ class LightController(hass.Hass, mqtt.Mqtt):
 
     def detect_state(self):
         state = self.get_state(self.light_entity)
+        brightness = self.get_state(self.light_entity, attribute=BRIGHTNESS)
         if state.upper() == OFF:
             detected_state = OFF
             if self.current_state != detected_state:
                 self.log('state=%s' % detected_state)
+        if brightness == self.brightness_dimmed_light and self.timer is not None:
+            # Lets detected MOTION_DIMMED state based on brightness only and timer status.
+            # Otherwise, continue detection.
+            detected_state = MOTION_DIMMED
+            if self.current_state != detected_state:
+                self.log('state=%s, brightness=%s' % (detected_state, str(brightness)))
         elif self.color_temp_support:
-            brightness = self.get_state(self.light_entity, attribute=BRIGHTNESS)
             color_temp = self.get_state(self.light_entity, attribute=COLOR_TEMP)
             if brightness == 0:
                 detected_state = OFF
@@ -340,7 +361,6 @@ class LightController(hass.Hass, mqtt.Mqtt):
             if self.current_state != detected_state:
                 self.log('state=%s, brightness=%s, color_temp=%s' % (detected_state, str(brightness), str(color_temp)))
         else:
-            brightness = self.get_state(self.light_entity, attribute=BRIGHTNESS)
             if brightness == 0:
                 detected_state = OFF
             elif brightness == self.scene_cold[BRIGHTNESS] or brightness == (self.scene_cold[BRIGHTNESS] - 1):
@@ -366,6 +386,10 @@ class LightController(hass.Hass, mqtt.Mqtt):
             self.light_turn_off(transition=transition)
         elif scene == ON:
             self.light_turn_on(transition=transition)
+        elif scene == MOTION_DIMMED:
+            # For MOTION_DIMMED change brightness only, as it will preserve color temperature,
+            # that we don't want to change.
+            self.light_turn_on(transition=transition, brightness=self.brightness_dimmed_light)
         elif self.color_temp_support:
             if scene == COLD:
                 self.light_turn_on(transition=transition, color_temp=self.scene_cold[COLOR_TEMP],
