@@ -122,9 +122,9 @@ class LightController(hass.Hass, mqtt.Mqtt):
                                   topic="zigbee2mqtt/%s" % sensor['name'],
                                   motion_sensor=sensor)
                 self.log('Input %s' % str(sensor))
-            self.timer = None
         else:
             self.motion_sensors = None
+        self.timer = None
         self.power_off_cancel_timeout = self.args.get('power_off_cancel_timeout', 8)
         self.motion_power_off_transition_time = self.args.get('motion_power_off_transition_time', 5)
         self.brightness_dimmed_light = self.args.get('brightness_dimmed_light', 8)
