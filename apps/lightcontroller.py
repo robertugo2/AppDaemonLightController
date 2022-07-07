@@ -282,7 +282,7 @@ class LightController(hass.Hass, mqtt.Mqtt):
             # or time period is not in power off transition time
             # Note: ... plus condition from upper level, that state is not in desired one
             if self.current_state != UNDEFINED \
-                    or ((time.time() - kwargs['started']) > (self.motion_power_off_transition_time + 1)):
+                    or ((time.time() - kwargs['started']) > (self.motion_power_off_transition_time + 2)):
                 # Timer is canceled, but if no motion is detected,
                 # then timer will be started over in next if statement
                 self.cancel_timer(self.timer)
