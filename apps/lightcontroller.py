@@ -79,9 +79,16 @@ class LightController(hass.Hass, mqtt.Mqtt):
             self.listen_event(self.on_click, "MQTT_MESSAGE", namespace='mqtt', topic="zigbee2mqtt/%s" % switch['name'],
                               switch=switch['name'])
             # Process remaining config options
-            switch[SINGLE] = switch.get(SINGLE, SINGLE)
-            switch[HOLD] = switch.get(HOLD, HOLD)
-            switch[DOUBLE] = switch.get(DOUBLE, DOUBLE)
+            switch['type'] = switch.get('type', 'aqara')
+            if switch['type'] == 'aqara':
+                switch[SINGLE] = switch.get(SINGLE, SINGLE)
+                switch[HOLD] = switch.get(HOLD, HOLD)
+                switch[DOUBLE] = switch.get(DOUBLE, DOUBLE)
+            elif switch['type'] in ['philips', 'philips_bind']:
+                pass
+            else:
+                raise Exception("Unknown switch type {}".format(switch['type']))
+
             # Save switch config
             self.switches[switch['name']] = switch
             # Log switch configuration
@@ -116,11 +123,16 @@ class LightController(hass.Hass, mqtt.Mqtt):
             self.log('Motion timeout %d' % self.motion_timeout)
             for sensor in self.args['motion_sensors']:
                 sensor['turn_on'] = sensor.get('turn_on', True)
+                sensor['type'] = sensor.get('type', 'mqtt')
+                sensor['true_value'] = sensor.get('true_value', None)
                 self.motion_sensors[sensor['name']] = False  # Assume some initial condition - no motion
-                self.mqtt_subscribe("zigbee2mqtt/%s" % sensor['name'], namespace='mqtt')
-                self.listen_event(self.on_occupancy_change, "MQTT_MESSAGE", namespace='mqtt',
-                                  topic="zigbee2mqtt/%s" % sensor['name'],
-                                  motion_sensor=sensor)
+                if sensor['type'] == 'mqtt':
+                    self.mqtt_subscribe("zigbee2mqtt/%s" % sensor['name'], namespace='mqtt')
+                    self.listen_event(self.occupancy_mqtt_callback, "MQTT_MESSAGE", namespace='mqtt',
+                                      topic="zigbee2mqtt/%s" % sensor['name'],
+                                      motion_sensor=sensor)
+                else:
+                    self.listen_state(self.occupancy_ha_callback, sensor['name'], motion_sensor=sensor)
                 self.log('Input %s' % str(sensor))
         else:
             self.motion_sensors = None
@@ -129,6 +141,7 @@ class LightController(hass.Hass, mqtt.Mqtt):
         self.motion_power_off_transition_time = self.args.get('motion_power_off_transition_time', 5)
         self.brightness_dimmed_light = self.args.get('brightness_dimmed_light', 8)
 
+        # Contacts
         self.contacts = {}
         if self.args.get('contacts'):
             self.log("Adding contacts")
@@ -147,38 +160,71 @@ class LightController(hass.Hass, mqtt.Mqtt):
         self.listen_state(self.on_light, self.light_entity, attribute='all')
         self.current_state = ''
         self.current_state = self.detect_state()
+        self.set_ha_state()
 
         # Select default scene
         self.process_default_scene()
 
         # Subscribe to HA event
-        self.listen_event(self.process_event, event="lightctrl.set")
+        self.listen_event(self.on_ha_event, event="lightctrl.set")
+
+        # Process 'MQTT' custom events
+        if self.args.get('events'):
+            self.log("Adding MQTT events")
+            for event_data in self.args['events']:
+                self.log('Event data: %s' % str(event_data))
+                self.mqtt_subscribe("zigbee2mqtt/%s" % event_data['name'], namespace='mqtt')
+                self.listen_event(self.on_mqtt_event, "MQTT_MESSAGE", namespace='mqtt',
+                                  topic="zigbee2mqtt/%s" % event_data['name'],
+                                  event_data=event_data)
+
+    def on_mqtt_event(self, event_name, data, kwargs):
+        event_data = kwargs['event_data']
+        payload = json.loads(data['payload'])
+        value = payload.get(event_data['field'], None)
+
+        if value == event_data['value']:
+            self.process_action(
+                action=event_data.get('action', None),
+                transition=event_data.get('transition', 0),
+                scene=event_data.get('scene', None))
+            self.log("MQTT event processed: e=%s, p=%s, v=%s" % (str(event_data), str(payload), value))
 
     # Process external events like from the HA
-    def process_event(self, event, data, kwargs):
+    def on_ha_event(self, event, data, kwargs):
         acceptable_names = {'all', self.light_entity, self.mqtt_entity}
         # Below, please have in mind, that mqtt_entity can be None, so default value for 'light' can't be None
         if (data.get('light', 'NONE') in acceptable_names) or any(
                 n in data.get('lights', {}) for n in acceptable_names):
-            self.log("Event received %s" % str(data))
-            action = data.get('action', None)
-            transition = data.get('transition', 0)
-            if action == 'turn_on':
-                if self.current_state == OFF or self.is_motion_dimm_running:
-                    self.select_scene(self.default_scene, transition)
-                    self.log("Turn ON the light due to event")
-            elif action == 'turn_off':
-                if self.current_state != OFF:
-                    self.select_scene(OFF, transition)
-                    self.log("Turn OFF the light due to event")
-            elif action == 'set_scene' and data.get('scene', None) in {OFF, WARM, COLD, DIMM}:
-                scene = data['scene']
-                self.select_scene(scene)
-                self.log("Select %s scene due to event" % scene)
-            elif action == 'toggle':
-                self.toggle_light()
-            else:
-                raise Exception('Incorrect action %s' % action)
+            self.process_action(
+                action=data.get('action', None),
+                transition=data.get('transition', 0),
+                scene=data.get('scene', None))
+            self.log("HA event processed: %s" % str(data))
+
+    def process_action(self, action, transition=0, scene=None):
+        if action == 'turn_on':
+            if self.current_state == OFF or self.is_motion_dimm_running:
+                self.select_scene(self.default_scene, transition)
+                self.log("Turn ON the light due to event")
+        elif action == 'turn_on_motion_dimmed':
+            if self.is_motion_dimm_running:
+                self.select_scene(self.default_scene, transition, force=True)
+                self.log("Turn ON the light due to event during motion dimmed state")
+        elif action == 'force_turn_on':
+            self.select_scene(self.default_scene, transition, force=True)
+            self.log("Force turn ON the light due to event")
+        elif action == 'turn_off':
+            if self.current_state != OFF:
+                self.select_scene(OFF, transition)
+                self.log("Turn OFF the light due to event")
+        elif action == 'set_scene' and scene in {OFF, WARM, COLD, DIMM}:
+            self.select_scene(scene, transition)
+            self.log("Select %s scene due to event" % scene)
+        elif action == 'toggle':
+            self.toggle_light()
+        else:
+            raise Exception('Incorrect action %s' % action)
 
     def on_contact(self, event_name, data, kwargs):
         contact = kwargs['contact']
@@ -199,18 +245,30 @@ class LightController(hass.Hass, mqtt.Mqtt):
             self.select_scene(self.default_scene)
             self.log("Light on due to %s contact sensor" % contact_name)
 
-    # Callback for motion sensors.
-    # Determine, if there is any change in occupancy status for monitored devices
-    def on_occupancy_change(self, event_name, data, kwargs):
+    # HA Callback for motion sensors.
+    def occupancy_ha_callback(self, entity, attribute, old, new, kwargs):
+        # Call main processing function
+        self.occupancy_data_processing(kwargs['motion_sensor'], new)
 
+    # MQTT Callback for motion sensors.
+    def occupancy_mqtt_callback(self, event_name, data, kwargs):
         motion_sensor = kwargs['motion_sensor']
-        sensor_name = motion_sensor['name']
         payload = json.loads(data['payload'])
-        occupancy = payload.get('occupancy', None)
+        occupancy = payload.get(motion_sensor.get('monitored_field', 'occupancy'), None)
 
         # Payload does not contain occupancy data
         if occupancy is None:
             return
+
+        # Call main processing function
+        self.occupancy_data_processing(kwargs['motion_sensor'], occupancy)
+
+    # Determine, if there is any change in occupancy status for monitored devices
+    def occupancy_data_processing(self, motion_sensor, occupancy):
+
+        if motion_sensor['true_value'] is not None:
+            occupancy = occupancy == motion_sensor['true_value']
+        sensor_name = motion_sensor['name']
 
         # No change detected
         if self.motion_sensors[sensor_name] == occupancy:
@@ -227,7 +285,7 @@ class LightController(hass.Hass, mqtt.Mqtt):
         # that is called during light state change as well.
         if (self.current_state == OFF or self.is_motion_dimm_running) and occupancy is True:
 
-            # Do not turn off light, when time from last turn off command via switch
+            # Do not turn on light, when time from last turn off command via switch
             # is less than 'ignore_motion_after_turn_off_time'.
             if (time.time() - self.last_turn_off_due_to_switch) < self.ignore_motion_after_turn_off_time:
                 self.log('Light on due to motion detection ignored, '
@@ -240,7 +298,7 @@ class LightController(hass.Hass, mqtt.Mqtt):
                 self.select_scene(self.default_scene, transition=0, force=True)
                 self.log("Light on due to %s motion sensor and light in dimmed state" % sensor_name)
 
-            # Simply turn on the light
+            # Simply turn on the light, if auto on is enabled
             elif motion_sensor['turn_on']:
                 self.select_scene(self.default_scene, transition=1)
                 self.log("Light on due to %s motion sensor (turn_on flag enabled)" % sensor_name)
@@ -292,8 +350,13 @@ class LightController(hass.Hass, mqtt.Mqtt):
         # If timer is not running (so motion timeout is not running), light is on and there is no motion detected,
         # then start timeout timer.
         if self.timer is None and self.current_state != OFF and all_motion_sensors_off:
-            self.timer = self.run_in(self.on_timer, self.motion_timeout)
-            self.log('Timer start')
+            if self.motion_timeout == 0:
+                # Go directly to motion dimmed scene
+                self.select_motion_dimmed_scene()
+                self.log('Select directly MOTION_DIMMED scene due to motion_timeout=0.')
+            else:
+                self.timer = self.run_in(self.on_timer, self.motion_timeout)
+                self.log('Timer start')
 
     # Process timer timeout
     def on_timer(self, kwargs):
@@ -304,12 +367,15 @@ class LightController(hass.Hass, mqtt.Mqtt):
             self.current_state = OFF  # set current scene here due to race condition
             self.log('Timer timeout: Select OFF scene')
         else:
-            # Change scene to dimmed one and start timer again in dimmed mode/state
-            self.select_scene(MOTION_DIMMED, transition=self.motion_power_off_transition_time)
-            self.current_state = MOTION_DIMMED  # set current scene here due to race condition
-            self.timer = self.run_in(self.on_timer, self.power_off_cancel_timeout, state=MOTION_DIMMED,
-                                     started=time.time())
+            self.select_motion_dimmed_scene()
             self.log('Timer timeout: Select MOTION_DIMMED scene')
+
+    def select_motion_dimmed_scene(self):
+        # Change scene to dimmed one and start timer again in dimmed mode/state
+        self.select_scene(MOTION_DIMMED, transition=self.motion_power_off_transition_time)
+        self.current_state = MOTION_DIMMED  # set current scene here due to race condition
+        self.timer = self.run_in(self.on_timer, self.power_off_cancel_timeout, state=MOTION_DIMMED,
+                                 started=time.time())
 
     # Select default light scene and change light temperature for lights, that are on (if enabled).
     def process_default_scene(self):
@@ -342,17 +408,50 @@ class LightController(hass.Hass, mqtt.Mqtt):
         self.log("Action '%s' from '%s'" % (event, entity))
         switch = self.switches[entity]
 
+        if switch['type'] in ['philips', 'philips_bind']:
+            self.on_click_philips(switch, event)
+        elif switch['type'] == 'aqara':
+            self.on_click_aqara(switch, event)
+        else:
+            raise Exception('Unknown switch type {}'.format(switch['type']))
+
+    # Processing for Aqara type switches
+    def on_click_aqara(self, switch, event):
         # Select action
         if event == switch[SINGLE]:
             self.toggle_light()
         if event == switch[DOUBLE]:
             if self.current_state == WARM:
                 self.select_scene(COLD)
-            else:
+            elif self.current_state in {COLD, OFF, DIMM}:
                 self.select_scene(WARM)
+            else:
+                self.select_scene(self.default_scene)
         if event == switch[HOLD]:
             if self.current_state != DIMM:
                 self.select_scene(DIMM)
+
+    # Processing for Philips Hue Dimmer Switch
+    # In case of philips switches there is no option to change buttons behavior
+    def on_click_philips(self, switch, event):
+
+        # On/Off
+        if event == 'on_press_release':
+            if switch['type'] == 'philips':
+                self.toggle_light()
+
+        # Dimmed light
+        if event in ['on_hold', 'off_hold']:
+            self.select_scene(DIMM)
+
+        # Toggle scenes
+        if event == 'off_press_release':
+            if self.current_state == WARM:
+                self.select_scene(COLD)
+            elif self.current_state in {COLD, OFF, DIMM}:
+                self.select_scene(WARM)
+            else:
+                self.select_scene(self.default_scene)
 
     # Toggle light (ON-OFF)
     def toggle_light(self):
@@ -369,21 +468,28 @@ class LightController(hass.Hass, mqtt.Mqtt):
     def on_light(self, entity, attribute, old, new, kwargs):
         self.current_state = self.detect_state()
         self.process_light_timeout()
+        self.set_ha_state()
 
     # Callback for time based triggers - for default scene change during a day
     def on_time(self, kwargs):
         self.log("Time triggered default scene processing.")
         self.process_default_scene()
 
-    #
+    # Function for detecting current state, as LightController is designed to be
+    # a state-less controller. Thanks to that external control via HA or custom automations is still possible.
     def detect_state(self):
+
         state = self.get_state(self.light_entity)
         brightness = self.get_state(self.light_entity, attribute=BRIGHTNESS)
+
+        def check_brightness(val, tolerance=1):
+            return (val - tolerance) <= brightness <= (val + tolerance)
+
         if state.upper() == OFF:
             detected_state = OFF
             if self.current_state != detected_state:
                 self.log('state=%s' % detected_state)
-        elif brightness == self.brightness_dimmed_light and self.is_motion_dimm_running:
+        elif check_brightness(self.brightness_dimmed_light) and self.is_motion_dimm_running:
             # Lets detected MOTION_DIMMED state based on brightness and timer status.
             # Otherwise, continue detection.
             detected_state = MOTION_DIMMED
@@ -393,14 +499,11 @@ class LightController(hass.Hass, mqtt.Mqtt):
             color_temp = self.get_state(self.light_entity, attribute=COLOR_TEMP)
             if brightness == 0:
                 detected_state = OFF
-            elif (brightness == self.scene_cold[BRIGHTNESS] or brightness == (
-                    self.scene_cold[BRIGHTNESS] - 1)) and color_temp == self.scene_cold[COLOR_TEMP]:
+            elif check_brightness(self.scene_cold[BRIGHTNESS]) and color_temp == self.scene_cold[COLOR_TEMP]:
                 detected_state = COLD
-            elif (brightness == self.scene_warm[BRIGHTNESS] or brightness == (
-                    self.scene_warm[BRIGHTNESS] - 1)) and color_temp == self.scene_warm[COLOR_TEMP]:
+            elif check_brightness(self.scene_warm[BRIGHTNESS]) and color_temp == self.scene_warm[COLOR_TEMP]:
                 detected_state = WARM
-            elif (brightness == self.scene_dimm[BRIGHTNESS] or brightness == (
-                    self.scene_dimm[BRIGHTNESS] - 1)) and color_temp == self.scene_dimm[COLOR_TEMP]:
+            elif check_brightness(self.scene_dimm[BRIGHTNESS]) and color_temp == self.scene_dimm[COLOR_TEMP]:
                 detected_state = DIMM
             else:
                 detected_state = UNDEFINED
@@ -421,6 +524,7 @@ class LightController(hass.Hass, mqtt.Mqtt):
                 self.log('state=%s, brightness=%s' % (detected_state, str(brightness)))
         return detected_state
 
+    # Select scene by simply providing a scene name
     def select_scene(self, scene, transition=0, force=False):
         self.log('Changing scene to %s' % scene)
         now = time.time()
@@ -459,6 +563,7 @@ class LightController(hass.Hass, mqtt.Mqtt):
                 raise Exception('Unrecognized scene to set %s' % str(scene))
         self.last_command = time.time()
 
+    # Generic logic for turning on light(s)
     def light_turn_on(self, **kwargs):
         if self.mqtt_entity:
             kwargs['state'] = 'ON'
@@ -467,6 +572,7 @@ class LightController(hass.Hass, mqtt.Mqtt):
         else:
             self.turn_on(self.light_entity, **kwargs)
 
+    # Generic logic for turning off light(s)
     def light_turn_off(self, **kwargs):
         if self.mqtt_entity:
             kwargs['state'] = 'OFF'
@@ -474,3 +580,19 @@ class LightController(hass.Hass, mqtt.Mqtt):
             self.mqtt_publish(topic="zigbee2mqtt/%s/set" % self.mqtt_entity, payload=msg, namespace='mqtt')
         else:
             self.turn_off(self.light_entity, **kwargs)
+
+    def set_ha_state(self):
+        if (time.time() - self.last_command) < 1 and self.current_state == UNDEFINED:
+            return
+        user_friendly_mapping = {
+            DIMM: 'Dimm',
+            MOTION_DIMMED: 'MotD',
+            ON: 'On',
+            OFF: 'Off',
+            WARM: 'Warm',
+            COLD: 'Cold',
+            UNDEFINED: 'On',
+        }
+        self.set_state(self.light_entity, attributes={
+            'app_ctrl_state': user_friendly_mapping.get(self.current_state, 'Error')
+        })
