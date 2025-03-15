@@ -95,15 +95,17 @@ class LightController(hass.Hass, mqtt.Mqtt):
             self.log('Input: %s' % switch)
 
         # Configure time based scene selector. Used in addition to sun based processing.
-        if self.args.get("cold_scene_time"):
-            self.cold_scene_time = self.args['cold_scene_time']
+        self.cold_scene_time = self.args.get("cold_scene_time", None)
+        if self.cold_scene_time == 'disabled':
+            self.cold_scene_time = None
         else:
             self.cold_scene_time = {
                 'start': "06:50:00",
                 'end': "19:00:00"
             }
-        self.run_daily(self.on_time, self.cold_scene_time['start'], random_start=5, random_end=10)
-        self.run_daily(self.on_time, self.cold_scene_time['end'], random_start=5, random_end=10)
+        if self.cold_scene_time is not None:
+            self.run_daily(self.on_time, self.cold_scene_time['start'], random_start=5, random_end=10)
+            self.run_daily(self.on_time, self.cold_scene_time['end'], random_start=5, random_end=10)
 
         # For dimm scene, we don't want to have default behavior
         if self.args.get("warm_scene_time"):
@@ -141,6 +143,9 @@ class LightController(hass.Hass, mqtt.Mqtt):
         self.motion_power_off_transition_time = self.args.get('motion_power_off_transition_time', 5)
         self.brightness_dimmed_light = self.args.get('brightness_dimmed_light', 8)
 
+        self.turn_on_light_enable_entity = self.args.get('turn_on_light_enable_entity', None)
+        self.turn_on_light_enable_true_value = self.args.get('turn_on_light_enable_true_value', None)
+
         # Contacts
         self.contacts = {}
         if self.args.get('contacts'):
@@ -163,6 +168,7 @@ class LightController(hass.Hass, mqtt.Mqtt):
         self.set_ha_state()
 
         # Select default scene
+        self.default_scene = None
         self.process_default_scene()
 
         # Subscribe to HA event
@@ -300,8 +306,15 @@ class LightController(hass.Hass, mqtt.Mqtt):
 
             # Simply turn on the light, if auto on is enabled
             elif motion_sensor['turn_on']:
-                self.select_scene(self.default_scene, transition=1)
-                self.log("Light on due to %s motion sensor (turn_on flag enabled)" % sensor_name)
+                # Check, if auto on functionality is currently enabled
+                turn_on_enable = True
+                if self.turn_on_light_enable_entity:
+                    turn_on_enable = (
+                            self.get_state(self.turn_on_light_enable_entity) == self.turn_on_light_enable_true_value)
+
+                if turn_on_enable:
+                    self.select_scene(self.default_scene, transition=1)
+                    self.log("Light on due to %s motion sensor (turn_on flag enabled)" % sensor_name)
         self.process_light_timeout()
 
     # Check, if timer is running in dimmed state.
@@ -380,7 +393,7 @@ class LightController(hass.Hass, mqtt.Mqtt):
     # Select default light scene and change light temperature for lights, that are on (if enabled).
     def process_default_scene(self):
 
-        if self.now_is_between(self.cold_scene_time['start'], self.cold_scene_time['end']):
+        if self.cold_scene_time is None or self.now_is_between(self.cold_scene_time['start'], self.cold_scene_time['end']):
             self.default_scene = COLD
         # If warm scene time is not defined, then WARM scene is default outside of COLD scene time
         elif self.warm_scene_time is None or self.now_is_between(self.warm_scene_time['start'],
@@ -512,11 +525,11 @@ class LightController(hass.Hass, mqtt.Mqtt):
         else:
             if brightness == 0:
                 detected_state = OFF
-            elif brightness == self.scene_cold[BRIGHTNESS] or brightness == (self.scene_cold[BRIGHTNESS] - 1):
+            elif brightness == check_brightness(self.scene_cold[BRIGHTNESS]):
                 detected_state = COLD
-            elif brightness == self.scene_warm[BRIGHTNESS] or brightness == (self.scene_warm[BRIGHTNESS] - 1):
+            elif brightness == check_brightness(self.scene_warm[BRIGHTNESS]):
                 detected_state = WARM
-            elif brightness == self.scene_dimm[BRIGHTNESS] or brightness == (self.scene_dimm[BRIGHTNESS] - 1):
+            elif brightness == check_brightness(self.scene_dimm[BRIGHTNESS]):
                 detected_state = DIMM
             else:
                 detected_state = UNDEFINED
