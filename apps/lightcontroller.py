@@ -145,6 +145,9 @@ class LightController(hass.Hass, mqtt.Mqtt):
 
         self.turn_on_light_enable_entity = self.args.get('turn_on_light_enable_entity', None)
         self.turn_on_light_enable_true_value = self.args.get('turn_on_light_enable_true_value', None)
+        if self.turn_on_light_enable_entity is not None:
+            self.log("Motion turn on feature is controlled by {} entity with '{}' value".format(
+                str(self.turn_on_light_enable_entity), str(self.turn_on_light_enable_true_value)))
 
         # Contacts
         self.contacts = {}
@@ -312,7 +315,10 @@ class LightController(hass.Hass, mqtt.Mqtt):
                     turn_on_enable = (
                             self.get_state(self.turn_on_light_enable_entity) == self.turn_on_light_enable_true_value)
 
-                if turn_on_enable:
+                if turn_on_enable is False:
+                    self.log("Light on due to {} ignored, as functionality is disabled via {}"
+                             .format(sensor_name, self.turn_on_light_enable_entity))
+                else:
                     self.select_scene(self.default_scene, transition=1)
                     self.log("Light on due to %s motion sensor (turn_on flag enabled)" % sensor_name)
         self.process_light_timeout()
