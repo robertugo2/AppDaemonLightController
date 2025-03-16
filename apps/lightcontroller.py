@@ -151,7 +151,7 @@ class LightController(hass.Hass, mqtt.Mqtt):
         if self.args.get('contacts'):
             self.log("Adding contacts")
             for contact in self.args['contacts']:
-                self.contacts[contact['name']] = True  # closed
+                self.contacts[contact['name']] = None  # undefined
                 self.mqtt_subscribe("zigbee2mqtt/%s" % contact['name'], namespace='mqtt')
                 self.listen_event(self.on_contact, "MQTT_MESSAGE", namespace='mqtt',
                                   topic="zigbee2mqtt/%s" % contact['name'],
