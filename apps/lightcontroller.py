@@ -166,7 +166,7 @@ class LightController(hass.Hass, mqtt.Mqtt):
         # Listen state of light
         # State of light is buffered to speed up execution time
         self.listen_state(self.on_light, self.light_entity, attribute='all')
-        self.current_state = ''
+        self.current_state = UNDEFINED
         self.current_state = self.detect_state()
         self.set_ha_state()
 
@@ -502,15 +502,18 @@ class LightController(hass.Hass, mqtt.Mqtt):
         brightness = self.get_state(self.light_entity, attribute=BRIGHTNESS)
 
         def check_brightness(val, tolerance=1):
+            if val is None:
+                return False
             return (val - tolerance) <= brightness <= (val + tolerance)
 
         if state.upper() == OFF:
             detected_state = OFF
             if self.current_state != detected_state:
                 self.log('state=%s' % detected_state)
+        elif brightness is None:
+            self.log('Brightness is None, skip detection to leave previously detected state.')
         elif check_brightness(self.brightness_dimmed_light) and self.is_motion_dimm_running:
-            # Lets detected MOTION_DIMMED state based on brightness and timer status.
-            # Otherwise, continue detection.
+            # MOTION_DIMMED state detected based on brightness and timer status.
             detected_state = MOTION_DIMMED
             if self.current_state != detected_state:
                 self.log('state=%s, brightness=%s' % (detected_state, str(brightness)))
@@ -531,16 +534,17 @@ class LightController(hass.Hass, mqtt.Mqtt):
         else:
             if brightness == 0:
                 detected_state = OFF
-            elif brightness == check_brightness(self.scene_cold[BRIGHTNESS]):
+            elif check_brightness(self.scene_cold[BRIGHTNESS]):
                 detected_state = COLD
-            elif brightness == check_brightness(self.scene_warm[BRIGHTNESS]):
+            elif check_brightness(self.scene_warm[BRIGHTNESS]):
                 detected_state = WARM
-            elif brightness == check_brightness(self.scene_dimm[BRIGHTNESS]):
+            elif check_brightness(self.scene_dimm[BRIGHTNESS]):
                 detected_state = DIMM
             else:
                 detected_state = UNDEFINED
             if self.current_state != detected_state:
                 self.log('state=%s, brightness=%s' % (detected_state, str(brightness)))
+
         return detected_state
 
     # Select scene by simply providing a scene name
