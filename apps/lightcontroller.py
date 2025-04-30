@@ -511,7 +511,8 @@ class LightController(hass.Hass, mqtt.Mqtt):
             if self.current_state != detected_state:
                 self.log('state=%s' % detected_state)
         elif brightness is None:
-            self.log('Brightness is None, skip detection to leave previously detected state.')
+            self.log('Brightness is None, skip detection and leave previously detected state.')
+            detected_state = self.current_state
         elif check_brightness(self.brightness_dimmed_light) and self.is_motion_dimm_running:
             # MOTION_DIMMED state detected based on brightness and timer status.
             detected_state = MOTION_DIMMED
